@@ -71,14 +71,19 @@ boot_slave(Config) ->
     ok = interclock:boot(root_boot, [{type, root}, {dir, Path}]),
     {SeedId,_SeedEv} = itc:explode(itc:seed()),
     {UUID, SeedId} = interclock:id(root_boot),
-    {UUID, Fork} = interclock:fork(root_boot),
-    {UUID, Forked} = interclock:id(root_boot),
+    {UUID, Fork} = interclock:fork(root_boot), % returns the new fork to send away
+    {UUID, Forked} = interclock:id(root_boot), % has its own forked id
     ?assertEqual(itc:rebuild(SeedId,undefined),
                  itc:join(itc:rebuild(Fork, undefined),
                           itc:rebuild(Forked, undefined))),
+    %% Be *very* careful to use the right id to boot the replica!
     ok = interclock:boot(root_boot_slave, [{type, normal}, {dir, PathAlt},
-                                            {uuid, UUID}, {id, Forked}]),
+                                            {uuid, UUID}, {id, Fork}]),
     {ok,RootLog} = file:consult(filename:join(Path, "log")),
     {ok,AltLog} = file:consult(filename:join(PathAlt, "log")),
-    ok.
+    [{booted, _, UUID, SeedId, []},
+     {forked, _, UUID, SeedId, [{Forked,Fork}]}
+     |_] = RootLog,
+    ct:pal("~p", [{UUID, Fork}]),
+    [{booted, _, UUID, Fork, []} | _] = AltLog.
 

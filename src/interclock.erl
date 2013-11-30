@@ -16,15 +16,17 @@ boot(Name, Opts) ->
     case {proplists:get_value(type, Opts, normal),
                        proplists:get_value(uuid, Opts),
                        proplists:get_value(id, Opts)} of
-        {root, undefined, undefined} ->
+        {root, UUID, undefined} when UUID =/= undefined->
             {ClockId, _ClockEvent} = itc:explode(itc:seed()),
-            NewUUID = uuid:get_v4(),
-            start_process(Name, NewUUID, ClockId, Path, root);
+            start_process(Name, UUID, ClockId, Path, root);
+        {root, UUID, ClockId} when UUID =/= undefined,
+                                   ClockId =/= undefined ->
+            start_process(Name, UUID, ClockId, Path, root);
         {normal, ExistingUUID, ClockId} when ClockId =/= undefined,
                                              ExistingUUID =/= undefined ->
             start_process(Name, ExistingUUID, ClockId, Path, normal);
-        {normal, _, _} ->
-            {error, missing_id}
+        {_, _, _} ->
+            {error, missing_identity}
     end.
 
 id(Name) ->

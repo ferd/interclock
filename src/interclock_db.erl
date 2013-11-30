@@ -63,8 +63,8 @@ init({Name, Id, UUID, Path, Type}) ->
             ok = filelib:ensure_dir(Db),
             log({booted, calendar:local_time(), UUID, Id, []}, Log),
             Ref = bitcask:open(Db, [read_write]),
-            ok = ensure_identity(Ref, UUID, Id),
-            {ok, #state{id=Id, uuid=UUID, dir=Path, log=Log,
+            TrustedId = ensure_identity(Ref, UUID, Id, Log),
+            {ok, #state{id=TrustedId, uuid=UUID, dir=Path, log=Log,
                         db_path=Db, db_ref=Ref}}
     end.
 
@@ -89,7 +89,7 @@ handle_call(fork, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
     {NewId,_} = itc:explode(NewClock),
     {PeerId,_} = itc:explode(PeerClock),
     log({forked, calendar:local_time(), UUID, Id, [{NewId,PeerId}]}, Log),
-    ok = write(Db, <<"id">>, NewId),
+    ok = write_sync(Db, <<"id">>, NewId),
     {reply, {UUID, PeerId}, State#state{id=NewId}};
 handle_call(_Request, _From, State) ->
     {noreply, State}.
@@ -156,24 +156,92 @@ log(Term, FileName) ->
     ok = file:datasync(IoDevice),
     file:close(IoDevice).
 
-ensure_identity(Ref, UUID, Id) ->
+ensure_identity(Ref, UUID, Id, Log) ->
     case {bitcask:get(Ref, <<"id">>), bitcask:get(Ref, <<"uuid">>)} of
-        {not_found, not_found} -> % first opening
+        {not_found, not_found} ->
+            %% first opening
             ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
-            ok = bitcask:put(Ref, <<"uuid">>, term_to_binary(UUID));
-        {not_found, _Bin} ->
+            ok = bitcask:put(Ref, <<"uuid">>, term_to_binary(UUID)),
+            bitcask:sync(Ref),
+            Id;
+        {not_found, {ok, _Bin}} -> 
+            %% Maybe we crashed during first opening, but we should fail
+            %% and require manual intervention for now
             error(id_not_found);
-        {_Bin, not_found} ->
+        {{ok,_Bin}, not_found} ->
+            %% Maybe we crashed during first opening, but we should fail
+            %% and require manual intervention for now
             error(uuid_not_found);
-        {BinId, BinUUID} ->
+        {{ok,BinId}, {ok,BinUUID}} ->
+            %% There was table existing, likely healthy.
             case {binary_to_term(BinId), binary_to_term(BinUUID)} of
-                {Id, UUID} -> ok;
-                {Id, BadUUID} -> error({uuid_conflict, UUID, BadUUID});
-                {BadId, UUID} -> error({id_conflict, Id, BadId});
-                {BadId, BadUUID} -> error({identity_conflict, {Id,BadId},
-                                                              {UUID,BadUUID}})
+                {Id, UUID} ->
+                    %% All terms fit, good.
+                    Id;
+                {DiskId, UUID} ->
+                    %% This is our table by the UUID, but the ID passed in is
+                    %% outdated. This can be due to a restart with supervisor
+                    %% arguments saved in, or following a failed fork or join.
+                    id_from_logs(Ref, UUID, DiskId, Log);
+                {_, DiskUUID} ->
+                    %% This is not our table!
+                    error({uuid_conflict, UUID, DiskUUID});
+                {_, DiskUUID} -> error({uuid_conflict, {UUID,DiskUUID}})
              end
      end.
 
 write(Ref, Key, Val) ->
     bitcask:put(Ref, Key, term_to_binary(Val)).
+
+write_sync(Ref, Key, Val) ->
+    bitcask:put(Ref, Key, term_to_binary(Val)),
+    bitcask:sync(Ref).
+
+id_from_logs(Ref, UUID, DiskId, Log) ->
+    {ok, Data} = file:consult(Log),
+    %% We write we booted before entering here, so let's drop this and go for
+    %% second-to-last and find forks or merges.
+    Pos = length(Data)-1,
+    %% Consistency check on the DiskId -- it should be within this log
+    %% file somewhere, otherwise we may have a configuration error
+    %% on our hands.
+    %% Now let's recover.
+    case lists:nth(Pos, Data) of
+        {forked, _TS, UUID, DiskId, [{Id, _}]} ->
+            %% That's our last fork, likely a failed one.
+            %% Pick the new id from there.
+            %% We need to check the lineage, as the disk id
+            %% should be present in history
+            in_lineage(DiskId, Data),
+            recover(Ref, UUID, Id, failed_fork, Log),
+            Id;
+        {forked, _TS, UUID, _SomeId, [{DiskId, _}]} ->
+            %% That's our last fork, which succeeded.
+            %% The disk Id may or may not be in the lineage
+            %% depending on merge history.
+            recover(Ref, UUID, DiskId, fork, Log),
+            DiskId;
+        {recovered, _TS, UUID, DiskId, _Details} ->
+            %% We recovered once before. Let's trust this entry.
+            %% It should therefore be in the past lineage
+            in_lineage(DiskId, Data),
+            recover(Ref, UUID, DiskId, recovery, Log),
+            DiskId;
+        _ ->
+            %% This is abnormal?! If it were a regular boot (i.e.
+            %% first one, without forks or joins or recoveries),
+            %% our ID should have fit.
+            error({failed_recover, UUID, DiskId, Log})
+    end.
+
+recover(Ref, UUID, Id, Reason, Log) ->
+    ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
+    bitcask:sync(Ref),
+    log({recovered, calendar:local_time(), UUID, Id, [Reason]}, Log).
+
+in_lineage(DiskId, Logs) ->
+    AllIds = [element(4, Term) || Term <- Logs],
+    case lists:member(DiskId, AllIds) of
+        false -> error({bad_lineage, DiskId});
+        true -> ok
+    end.

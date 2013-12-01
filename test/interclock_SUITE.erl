@@ -12,7 +12,7 @@ all() ->
     [boot_root, boot_slave,
      fork_recovery, crashed_fork_recovery, recovery_good,
      recovery_recovery, bad_lineage_recovery, bad_uuid_recovery,
-     bad_log_uuid_recovery].
+     bad_log_uuid_recovery, crashed_join_recovery, join_recovery].
 
 groups() ->
     [].
@@ -297,7 +297,77 @@ bad_log_uuid_recovery(Config) ->
         interclock:boot(bad_log_uuid, [{type, normal}, {dir, Path},
                                       {id, 1}, {uuid, UUID}]).
 
-%% TODO: - test join recoveries
+
+%% For Id joining, the problem is particularly tricky because we have
+%% two perspectives -- the receiver, and the node being retired.
+%% The retired node doesn't matter in this case because all of its data
+%% should go away. The receiver may crash similarly to a fork.
+%% This test checks for a join as the last operation when the id provided
+%% doesn't match the latest one or isn't provided at all, and that the
+%% database ID seems to match the last join operation (but isn't up to date
+%% on disk yet)
+crashed_join_recovery(Config) ->
+    UUID = <<"fake uuid">>,
+    Path = filename:join(?config(priv_dir, Config), "crashed_join_recovery"),
+    %% Put in a DB that failed in a stable state, following a join
+    Db = filename:join(Path, "db"),
+    disk_state(Db, {0,1}, UUID),
+    %% Simulate a log file that resulted in a join in place.
+    %% The node should:
+    %% 1. join the two ids in memory without storing it
+    %% 2. log the join operation that has been proven to work
+    %% 3. commit to disk.
+    %% It is important that the join operation works before storing it.
+    LogFile = filename:join(Path, "log"),
+    fake_log([{booted, 1, []},
+              {forked, 1, [{{0,1}, {1,0}}]},
+              {joined, {0,1}, [{1,0}]}], % the join should result back in '1'
+             UUID,
+             LogFile),
+    %% Boot the db, with an outdated or unknown id. What we want here is
+    %% to make sure that an outdated id on a restart lands us with the correct
+    %% on-disk id
+    ok = interclock:boot(crashed_join_recovery, [{type, normal}, {dir, Path},
+                                         {id, undefined}, {uuid, UUID}]),
+    {UUID, 1} = interclock:id(crashed_join_recovery), % it recovered
+    %% The internal log should show this
+    {ok,NewLog} = file:consult(LogFile),
+    [{booted, _, UUID, 1, []},
+     {forked, _, UUID, 1, [{{0,1}, {1,0}}]},
+     {joined, _, UUID, {0,1}, [{1,0}]},
+     {booted, _, UUID, undefined, []},
+     {recovered, _, UUID, 1, [failed_join]} | _] = NewLog.
+
+%% This test checks for a join as the last operation when the id provided
+%% doesn't match the latest one or isn't provided at all, but the id in the
+%% DB is up to date regarding what the latest join operation would yield.
+join_recovery(Config) ->
+    UUID = <<"fake uuid">>,
+    Path = filename:join(?config(priv_dir, Config), "join_recovery"),
+    %% Put in a DB that failed in a stable state, following a join
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    %% Here the Id on disk matches the id that the logs logically lead to,
+    %% but isn't literally in there.
+    disk_state(Db, 1, UUID),
+    fake_log([{booted, 1, []},
+              {forked, 1, [{{0,1}, {1,0}}]},
+              {joined, {0,1}, [{1,0}]}], % the join should result back in '1'
+             UUID,
+             LogFile),
+    %% Boot the db, with an outdated or unknown id. What we want here is
+    %% to make sure that an outdated id on a restart lands us with the correct
+    %% on-disk id
+    ok = interclock:boot(join_recovery, [{type, normal}, {dir, Path},
+                                         {id, undefined}, {uuid, UUID}]),
+    {UUID, 1} = interclock:id(join_recovery), % it recovered
+    %% The internal log should show this
+    {ok,NewLog} = file:consult(LogFile),
+    [{booted, _, UUID, 1, []},
+     {forked, _, UUID, 1, [{{0,1}, {1,0}}]},
+     {joined, _, UUID, {0,1}, [{1,0}]},
+     {booted, _, UUID, undefined, []},
+     {recovered, _, UUID, 1, [join]} | _] = NewLog.
 
 %%%===================================================================
 %%% Helpers

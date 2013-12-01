@@ -220,6 +220,22 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
             %% depending on merge history.
             recover(Ref, UUID, DiskId, fork, Log),
             DiskId;
+        {joined, _TS, UUID, DiskId, [OtherId]} ->
+            %% That's our last join, likely a failed one. Merge back
+            %% the IDs to keep running.
+            {ok, Id} = join(DiskId, OtherId),
+            recover(Ref, UUID, Id, failed_join, Log),
+            Id;
+        {joined, _TS, UUID, OldId, [OtherId]} ->
+            %% That's our last join, likely a failed one. Merge back
+            %% the IDs to keep running.
+            case join(OldId, OtherId) of
+                {ok, DiskId} ->
+                    recover(Ref, UUID, DiskId, join, Log),
+                    DiskId;
+                {error, _} ->
+                    error(unstable_join_state)
+            end;
         {recovered, _TS, UUID, DiskId, _Details} ->
             %% We recovered once before. Let's trust this entry.
             %% It should therefore be in the past lineage
@@ -233,7 +249,7 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
             %% This is abnormal?! If it were a regular boot (i.e.
             %% first one, without forks or joins or recoveries),
             %% our ID should have fit.
-            error({failed_recover, UUID, DiskId, Log})
+            error({failed_recover, UUID, DiskId})
     end.
 
 recover(Ref, UUID, Id, Reason, Log) ->
@@ -246,4 +262,15 @@ in_lineage(DiskId, Logs) ->
     case lists:member(DiskId, AllIds) of
         false -> error({bad_lineage, DiskId});
         true -> ok
+    end.
+
+join(IdA, IdB) ->
+    try
+        Clock = itc:join(itc:rebuild(IdA, undefined),
+                         itc:rebuild(IdB, undefined)),
+        {NewId, _} = itc:explode(Clock),
+        {ok, NewId}
+    catch
+        Class:Reason -> % ooh a risky catch-all
+            {error, {Class,Reason}}
     end.

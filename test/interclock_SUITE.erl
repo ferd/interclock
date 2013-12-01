@@ -8,14 +8,22 @@
 %%% Common Test callbacks
 %%%===================================================================
 
-all() ->
-    [boot_root, boot_slave,
-     fork_recovery, crashed_fork_recovery, recovery_good,
-     recovery_recovery, bad_lineage_recovery, bad_uuid_recovery,
-     bad_log_uuid_recovery, crashed_join_recovery, join_recovery].
+all() -> [{group, boot},
+          {group, fork},
+          {group, join}].
 
 groups() ->
-    [].
+    [{boot, [],
+      [boot_root, boot_slave, {group, recovery}]},
+     {recovery, [],
+      [fork_recovery, crashed_fork_recovery, recovery_good, shutdown_recovery,
+       recovery_recovery, bad_lineage_recovery, bad_uuid_recovery,
+       bad_log_uuid_recovery, crashed_join_recovery, join_recovery]},
+     {fork, [],
+      [fork_standalone]},
+     {join, [],
+      [join_standalone, join_bad_id, join_shutdown]} % add: join_shutdown
+    ].
 
 init_per_suite(Config) ->
     Config.
@@ -32,6 +40,50 @@ init_per_group(_GroupName, Config) ->
 end_per_group(_GroupName, _Config) ->
     ok.
 
+%% Fork Inits
+init_per_testcase(fork_standalone, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "fork_standalone"),
+    Name = fork_standalone,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile},
+     {started, Started} | Config];
+%% Join Inits
+init_per_testcase(join_standalone, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "join_standalone"),
+    Name = join_standalone,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    {UUID, NewFork} = interclock:fork(Name),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile}, {fork, NewFork},
+     {started, Started} | Config];
+init_per_testcase(join_bad_id, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "join_bad_id"),
+    Name = join_bad_id,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile},
+     {started, Started} | Config];
+init_per_testcase(join_shutdown, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "join_shutdown"),
+    Name = join_shutdown,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile},
+     {started, Started} | Config];
+%% Rest
 init_per_testcase(_TestCase, Config) ->
     {ok, Started} = application:ensure_all_started(interclock),
     [{started, Started} | Config].
@@ -50,7 +102,7 @@ boot_root(Config) ->
     UUID = uuid:get_v4(),
     ok = interclock:boot(root_name, [{type, root}, {dir, Path}, {uuid, UUID}]),
     {SeedId,_SeedEv} = itc:explode(itc:seed()),
-    {UUID, SeedId} = interclock:id(root_name),
+    {UUID, SeedId} = interclock:identity(root_name),
     %% Same name / type / path
     {error, exists} = interclock:boot(root_name, [{type, root}, {dir, Path},
                                                   {uuid, UUID}]),
@@ -76,7 +128,7 @@ boot_root(Config) ->
     %% Same type is okay, given they don't get the same UUID nor path
     ok = interclock:boot(root_other, [{type, root}, {dir, PathAlt},
                                       {uuid, <<"fakeuuid">>}]),
-    {UUIDOther, SeedId} = interclock:id(root_other),
+    {UUIDOther, SeedId} = interclock:identity(root_other),
     ?assertNotEqual(UUIDOther, UUID).
 
 boot_slave(Config) ->
@@ -86,9 +138,9 @@ boot_slave(Config) ->
     ok = interclock:boot(root_boot, [{type, root}, {dir, Path},
                                      {uuid, UUID}]),
     {SeedId,_SeedEv} = itc:explode(itc:seed()),
-    {UUID, SeedId} = interclock:id(root_boot),
+    {UUID, SeedId} = interclock:identity(root_boot),
     {UUID, Fork} = interclock:fork(root_boot), % returns the new fork to send away
-    {UUID, Forked} = interclock:id(root_boot), % has its own forked id
+    {UUID, Forked} = interclock:identity(root_boot), % has its own forked id
     ?assertEqual(itc:rebuild(SeedId,undefined),
                  itc:join(itc:rebuild(Fork, undefined),
                           itc:rebuild(Forked, undefined))),
@@ -129,7 +181,7 @@ fork_recovery(Config) ->
     %% a restart lands us with the correct on-disk id
     ok = interclock:boot(fork_recovery, [{type, normal}, {dir, Path},
                                          {id, 1}, {uuid, UUID}]),
-    {UUID, good_id} = interclock:id(fork_recovery), % it recovered
+    {UUID, good_id} = interclock:identity(fork_recovery), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -159,7 +211,7 @@ crashed_fork_recovery(Config) ->
     %% Boot the db, and make sure we use the id we should have forked.
     ok = interclock:boot(crashed_fork, [{type, root}, {dir, Path},
                                         {id, good_id}, {uuid, UUID}]),
-    {UUID, good_id} = interclock:id(crashed_fork), % it recovered
+    {UUID, good_id} = interclock:identity(crashed_fork), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -188,7 +240,7 @@ recovery_good(Config) ->
     %% Boot the db, with an good id
     ok = interclock:boot(recovery_good, [{type, normal}, {dir, Path},
                                          {id, good_id}, {uuid, UUID}]),
-    {UUID, good_id} = interclock:id(recovery_good), % it recovered
+    {UUID, good_id} = interclock:identity(recovery_good), % it recovered
     %% The internal log should show no recovery needed
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -196,6 +248,37 @@ recovery_good(Config) ->
      {booted, _, UUID, 1, []},
      {recovered, _, UUID, good_id, [failed_fork]},
      {booted, _, UUID, good_id, []} | _] = NewLog.
+
+%% The node may have an outdated ID when being started, but the actual good id
+%% has been logged as part of an orderly shutdown. The node should be able to
+%% recover from the that record.
+shutdown_recovery(Config) ->
+    UUID = <<"fake uuid">>,
+    Path = filename:join(?config(priv_dir, Config), "shutdown_recovery"),
+    %% Put in a DB that failed in a good stable state
+    Db = filename:join(Path, "db"),
+    disk_state(Db, good_id, UUID),
+    %% Simulate a log file that resulted in that disk id following many
+    %% crashes and recoveries.
+    LogFile = filename:join(Path, "log"),
+    fake_log([{booted, 1, []},
+              {forked, 1, [{good_id, other_id}]},
+              {terminated, good_id, [some_reason]}],
+             UUID,
+             LogFile),
+    %% Boot the db, with an outdated id -- using 'bad_id' should also
+    %% work. What we want here is make sure that an outdated id on
+    %% a restart lands us with the correct on-disk id
+    ok = interclock:boot(shutdown_recovery, [{type, normal}, {dir, Path},
+                                             {id, undefined}, {uuid, UUID}]),
+    {UUID, good_id} = interclock:identity(shutdown_recovery), % it recovered
+    %% The internal log should show this
+    {ok,NewLog} = file:consult(LogFile),
+    [{booted, _, UUID, 1, []},
+     {forked, _, UUID, 1, [{good_id, other_id}]},
+     {terminated, _, UUID, good_id, [some_reason]},
+     {booted, _, UUID, undefined, []}, % let the recovery mechanism do its thing
+     {recovered, _, UUID, good_id, [termination]} | _] = NewLog.
 
 %% The node may have an outdated ID when being started, but the actual good id
 %% has been recovered before. The node should be able to recover from the
@@ -218,9 +301,9 @@ recovery_recovery(Config) ->
     %% Boot the db, with an outdated id -- using 'bad_id' should also
     %% work. What we want here is make sure that an outdated id on
     %% a restart lands us with the correct on-disk id
-    ok = interclock:boot(fork_recovery, [{type, normal}, {dir, Path},
+    ok = interclock:boot(recovery_recovery, [{type, normal}, {dir, Path},
                                          {id, undefined}, {uuid, UUID}]),
-    {UUID, good_id} = interclock:id(fork_recovery), % it recovered
+    {UUID, good_id} = interclock:identity(recovery_recovery), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -329,7 +412,7 @@ crashed_join_recovery(Config) ->
     %% on-disk id
     ok = interclock:boot(crashed_join_recovery, [{type, normal}, {dir, Path},
                                          {id, undefined}, {uuid, UUID}]),
-    {UUID, 1} = interclock:id(crashed_join_recovery), % it recovered
+    {UUID, 1} = interclock:identity(crashed_join_recovery), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -360,7 +443,7 @@ join_recovery(Config) ->
     %% on-disk id
     ok = interclock:boot(join_recovery, [{type, normal}, {dir, Path},
                                          {id, undefined}, {uuid, UUID}]),
-    {UUID, 1} = interclock:id(join_recovery), % it recovered
+    {UUID, 1} = interclock:identity(join_recovery), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
     [{booted, _, UUID, 1, []},
@@ -370,6 +453,91 @@ join_recovery(Config) ->
      {recovered, _, UUID, 1, [join]} | _] = NewLog.
 
 %%%===================================================================
+%%% Fork Test cases
+%%%===================================================================
+fork_standalone(Config) ->
+    Name = ?config(name, Config),
+    {UUID, Id} = interclock:identity(Name),
+    {UUID, NewFork} = interclock:fork(Name),
+    {UUID, NewId} = interclock:identity(Name),
+    %% The IDs are all different
+    false = Id == NewFork orelse Id == NewId orelse NewFork == NewId,
+    %% The new IDs are joinable to their old state, thus valid
+    {Id, _} = itc:explode(itc:join(itc:rebuild(NewFork, undefined),
+                                   itc:rebuild(NewId, undefined))),
+    %% The logs contain all necessary IDs and operations, only once.
+    {ok, Logs} = file:consult(?config(log, Config)),
+    ForkMatch = fun({forked, _, LogUUID, LogId, [{ForkLeft,ForkRight}]}) ->
+                    LogUUID =:= UUID andalso
+                    LogId =:= Id andalso
+                    ForkLeft =:= NewId andalso
+                    ForkRight =:= NewFork
+                ;  (_) -> false
+                end,
+    [1] = [1 || Log <- Logs, ForkMatch(Log)],
+    %% The DB has been updated to the new ID
+    {ok, NewId} = disk_read(?config(db, Config), <<"id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+
+%%%===================================================================
+%%% Join Test cases
+%%%===================================================================
+join_standalone(Config) ->
+    Name = ?config(name, Config),
+    ForkId = ?config(fork, Config),
+    {UUID, Id} = interclock:identity(Name),
+    %% The IDs are different
+    true = Id =/= ForkId,
+    %% The current IDs are joinable
+    {NewId, _} = itc:explode(itc:join(itc:rebuild(Id, undefined),
+                                      itc:rebuild(ForkId, undefined))),
+    {UUID, NewId} = interclock:join(Name, ForkId),
+    %% The logs contain all necessary IDs and operations, only once.
+    %% Note that join entries do not happen to note the joined id.
+    {ok, Logs} = file:consult(?config(log, Config)),
+    JoinMatch = fun({joined, _, LogUUID, LogId, [JoinId]}) ->
+                    LogUUID =:= UUID andalso
+                    LogId =:= Id andalso
+                    ForkId =:= JoinId
+                ;  (_) -> false
+                end,
+    [1] = [1 || Log <- Logs, JoinMatch(Log)],
+    %% The DB has been updated to the new ID
+    {ok, NewId} = disk_read(?config(db, Config), <<"id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+
+join_bad_id(Config) ->
+    Name = ?config(name, Config),
+    {UUID, Id} = interclock:identity(Name),
+    %% join with itself or another bad term fails
+    bad_id = interclock:join(Name, Id),
+    bad_id = interclock:join(Name, hey_there),
+    %% The logs contain no trace of these operations
+    {ok, Logs} = file:consult(?config(log, Config)),
+    JoinMatch = fun({joined, _, LogUUID, LogId, [_JoinId]}) ->
+                    LogUUID =:= UUID andalso
+                    LogId =:= Id
+                ;  (_) -> false
+                end,
+    [] = [1 || Log <- Logs, JoinMatch(Log)],
+    %% The DB has kept the old id
+    {ok, Id} = disk_read(?config(db, Config), <<"id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+
+join_shutdown(Config) ->
+    %% We can retire a node, which will give us its id back and delete its
+    %% files on disk.
+    Name = ?config(name, Config),
+    {ok, _} = file:consult(?config(log, Config)),
+    {ok, Id} = disk_read(?config(db, Config), <<"id">>),
+    {_UUID, Id} = interclock:retire(Name),
+    {error, enoent} = file:consult(?config(log, Config)),
+    %% this prints a lot of errors, but that's fine
+    {error, nofile} = disk_read(?config(db, Config), <<"id">>),
+    ?assertExit({noproc, _Stack}, interclock:identity(Name)).
+
+
+%%%===================================================================
 %%% Helpers
 %%%===================================================================
 disk_state(Db, Id, UUID) ->
@@ -377,6 +545,13 @@ disk_state(Db, Id, UUID) ->
     ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
     ok = bitcask:put(Ref, <<"uuid">>, term_to_binary(UUID)),
     ok = bitcask:close(Ref).
+
+disk_read(Db, Key) ->
+    Ref = bitcask:open(Db),
+    case bitcask:get(Ref, Key) of
+        {ok, Bin} -> {ok, binary_to_term(Bin)};
+        Other -> Other
+    end.
 
 fake_log(List, UUID, LogFile) ->
     {ok, IoDevice} = file:open(LogFile, [append]),

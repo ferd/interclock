@@ -1,5 +1,5 @@
 -module(interclock).
--export([boot/2, id/1, fork/1]).
+-export([boot/2, identity/1, fork/1, join/2, retire/1]).
 
 -type name() :: term().
 -type type() :: 'root' | 'normal'.
@@ -32,11 +32,17 @@ boot(Name, Opts) ->
             {error, missing_identity}
     end.
 
-id(Name) ->
-    interclock_db:id(Name).
+identity(Name) ->
+    interclock_db:identity(Name).
 
 fork(Name) ->
     interclock_db:fork(Name).
+
+join(Name, OtherId) ->
+    interclock_db:join(Name, OtherId).
+
+retire(Name) ->
+    interclock_db:retire(Name).
 
 %%%===================================================================
 %%% private

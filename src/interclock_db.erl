@@ -4,7 +4,7 @@
 
 %% API
 -export([start_link/5,
-         id/1, fork/1]).
+         identity/1, fork/1, join/2, retire/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -30,11 +30,17 @@
 start_link(Name, UUID, Id, Path, Type) ->
     gen_server:start_link(?MODULE, {Name, Id, UUID, Path, Type}, []).
 
-id(Name) ->
-    gen_server:call({via, gproc, {n,l,Name}}, id).
+identity(Name) ->
+    gen_server:call({via, gproc, {n,l,Name}}, identity).
 
 fork(Name) ->
     gen_server:call({via, gproc, {n,l,Name}}, fork, timer:seconds(30)).
+
+join(Name, OtherId) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {join, OtherId}, timer:seconds(30)).
+
+retire(Name) ->
+    gen_server:call({via, gproc, {n,l,Name}}, retire, timer:seconds(30)).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -82,8 +88,9 @@ init({Name, Id, UUID, Path, Type}) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call(id, _From, State=#state{id=Id, uuid=UUID}) ->
+handle_call(identity, _From, State=#state{id=Id, uuid=UUID}) ->
     {reply, {UUID, Id}, State};
+
 handle_call(fork, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
     {NewClock,PeerClock} = itc:fork(itc:rebuild(Id, undefined)),
     {NewId,_} = itc:explode(NewClock),
@@ -91,6 +98,28 @@ handle_call(fork, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
     log({forked, calendar:local_time(), UUID, Id, [{NewId,PeerId}]}, Log),
     ok = write_sync(Db, <<"id">>, NewId),
     {reply, {UUID, PeerId}, State#state{id=NewId}};
+
+handle_call({join, OtherId}, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
+    case maybe_join(Id, OtherId) of
+        {error, _} ->
+            {reply, bad_id, State};
+        {ok, NewId} ->
+            log({joined, calendar:local_time(), UUID, Id, [OtherId]}, Log),
+            ok = write_sync(Db, <<"id">>, NewId),
+            {reply, {UUID, NewId}, State#state{id=NewId}}
+    end;
+
+handle_call(retire, _From, State=#state{id=Id, uuid=UUID, log=Log, db_path=Db, db_ref=Ref}) ->
+    %% We shut down the node. Kill the logs, and the DB, then return the
+    %% identity.
+    _ = file:delete(Log),
+    %% Bitcask has no function to delete the DB, so we must go for it manually
+    bitcask:close(Ref),
+    Files = filelib:wildcard(Db++"/*"),
+    [file:delete(File) || File <- Files],
+    file:del_dir(Db),
+    {stop, {shutdown, retired}, {UUID, Id}, State};
+
 handle_call(_Request, _From, State) ->
     {noreply, State}.
 
@@ -131,6 +160,9 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+terminate({shutdown, retired}, #state{}) ->
+    %% Don't attempt to close stuff, we deleted it already.
+    ok;
 terminate(Reason, #state{uuid=UUID, id=Id, log=Log, db_ref=Db}) ->
     bitcask:close(Db),
     log({terminated, calendar:local_time(), UUID, Id, [{reason, Reason}]}, Log),
@@ -223,13 +255,13 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
         {joined, _TS, UUID, DiskId, [OtherId]} ->
             %% That's our last join, likely a failed one. Merge back
             %% the IDs to keep running.
-            {ok, Id} = join(DiskId, OtherId),
+            {ok, Id} = maybe_join(DiskId, OtherId),
             recover(Ref, UUID, Id, failed_join, Log),
             Id;
         {joined, _TS, UUID, OldId, [OtherId]} ->
             %% That's our last join, likely a failed one. Merge back
             %% the IDs to keep running.
-            case join(OldId, OtherId) of
+            case maybe_join(OldId, OtherId) of
                 {ok, DiskId} ->
                     recover(Ref, UUID, DiskId, join, Log),
                     DiskId;
@@ -239,8 +271,10 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
         {recovered, _TS, UUID, DiskId, _Details} ->
             %% We recovered once before. Let's trust this entry.
             %% It should therefore be in the past lineage
-            in_lineage(DiskId, Data),
             recover(Ref, UUID, DiskId, recovery, Log),
+            DiskId;
+        {terminated, _TS, UUID, DiskId, _Details} ->
+            recover(Ref, UUID, DiskId, termination, Log),
             DiskId;
         {_Term, _Ts, OtherUUID, _DiskId, _Details} when OtherUUID =/= UUID ->
             error({uuid_conflict, OtherUUID, UUID});
@@ -264,7 +298,7 @@ in_lineage(DiskId, Logs) ->
         true -> ok
     end.
 
-join(IdA, IdB) ->
+maybe_join(IdA, IdB) ->
     try
         Clock = itc:join(itc:rebuild(IdA, undefined),
                          itc:rebuild(IdB, undefined)),

@@ -185,8 +185,7 @@ ensure_identity(Ref, UUID, Id, Log) ->
                     id_from_logs(Ref, UUID, DiskId, Log);
                 {_, DiskUUID} ->
                     %% This is not our table!
-                    error({uuid_conflict, UUID, DiskUUID});
-                {_, DiskUUID} -> error({uuid_conflict, {UUID,DiskUUID}})
+                    error({uuid_conflict, UUID, DiskUUID})
              end
      end.
 
@@ -227,7 +226,10 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
             in_lineage(DiskId, Data),
             recover(Ref, UUID, DiskId, recovery, Log),
             DiskId;
+        {_Term, _Ts, OtherUUID, _DiskId, _Details} when OtherUUID =/= UUID ->
+            error({uuid_conflict, OtherUUID, UUID});
         _ ->
+            in_lineage(DiskId, Data),
             %% This is abnormal?! If it were a regular boot (i.e.
             %% first one, without forks or joins or recoveries),
             %% our ID should have fit.

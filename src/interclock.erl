@@ -22,6 +22,9 @@ boot(Name, Opts) ->
         {root, UUID, ClockId} when UUID =/= undefined,
                                    ClockId =/= undefined ->
             start_process(Name, UUID, ClockId, Path, root);
+        {normal, ExistingUUID, undefined} when ExistingUUID =/= undefined ->
+            %% Maybe rebooting! Trust the recovery mechanisms.
+            start_process(Name, ExistingUUID, undefined, Path, normal);
         {normal, ExistingUUID, ClockId} when ClockId =/= undefined,
                                              ExistingUUID =/= undefined ->
             start_process(Name, ExistingUUID, ClockId, Path, normal);

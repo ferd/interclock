@@ -43,4 +43,4 @@ init([]) ->
     {ok, {{simple_one_for_one, 5, 10},
           [{db,
             {interclock_db, start_link, []},
-            permanent, timer:seconds(15), worker, [interclock_db]}]}}.
+            transient, timer:seconds(15), worker, [interclock_db]}]}}.

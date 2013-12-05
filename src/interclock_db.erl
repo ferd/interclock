@@ -4,7 +4,8 @@
 
 %% API
 -export([start_link/5,
-         identity/1, fork/1, join/2, retire/1]).
+         identity/1, fork/1, join/2, retire/1,
+         read/2, peek/2, write/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -41,6 +42,15 @@ join(Name, OtherId) ->
 
 retire(Name) ->
     gen_server:call({via, gproc, {n,l,Name}}, retire, timer:seconds(30)).
+
+read(Name, Key) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {read, Key}).
+
+peek(Name, Key) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {peek, Key}).
+
+write(Name, Key, Val) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {write, Key, Val}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -96,7 +106,7 @@ handle_call(fork, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
     {NewId,_} = itc:explode(NewClock),
     {PeerId,_} = itc:explode(PeerClock),
     log({forked, calendar:local_time(), UUID, Id, [{NewId,PeerId}]}, Log),
-    ok = write_sync(Db, <<"id">>, NewId),
+    ok = db_write_sync(Db, <<"id">>, NewId),
     {reply, {UUID, PeerId}, State#state{id=NewId}};
 
 handle_call({join, OtherId}, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
@@ -105,7 +115,7 @@ handle_call({join, OtherId}, _From, State=#state{id=Id, uuid=UUID, log=Log, db_r
             {reply, bad_id, State};
         {ok, NewId} ->
             log({joined, calendar:local_time(), UUID, Id, [OtherId]}, Log),
-            ok = write_sync(Db, <<"id">>, NewId),
+            ok = db_write_sync(Db, <<"id">>, NewId),
             {reply, {UUID, NewId}, State#state{id=NewId}}
     end;
 
@@ -119,6 +129,32 @@ handle_call(retire, _From, State=#state{id=Id, uuid=UUID, log=Log, db_path=Db, d
     [file:delete(File) || File <- Files],
     file:del_dir(Db),
     {stop, {shutdown, retired}, {UUID, Id}, State};
+
+handle_call({read, Key}, _From, State=#state{db_ref=Db}) ->
+    Reply = case db_read(Db, Key) of
+        {ok, {_Clock, [Val]}} -> {ok, Val};
+        {error, undefined} -> {error, undefined}
+    end,
+    {reply, Reply, State};
+
+handle_call({peek, Key}, _From, State=#state{db_ref=Db}) ->
+    Reply = case db_read(Db, Key) of
+        {ok, {Clock, Vals}} -> {ok, Clock, Vals};
+        {error, undefined} -> {error, undefined}
+    end,
+    {reply, Reply, State};
+
+handle_call({write, Key, Val}, _From, State=#state{db_ref=Db, id=Id}) ->
+    case db_read(Db, Key) of
+        {ok, {Clock, _}} ->
+            {_, NewClock} = itc:explode(itc:event(itc:rebuild(Id, Clock))),
+            db_write(Db, Key, {NewClock, [Val]});
+        {error, undefined} ->
+            {_, Clock} = itc:explode(itc:rebuild(Id, undefined)),
+            db_write(Db, Key, {Clock, [Val]})
+    end,
+    {reply, ok, State};
+
 
 handle_call(_Request, _From, State) ->
     {noreply, State}.
@@ -221,10 +257,16 @@ ensure_identity(Ref, UUID, Id, Log) ->
              end
      end.
 
-write(Ref, Key, Val) ->
+db_read(Ref, Key) ->
+    case bitcask:get(Ref, Key) of
+        {ok, Bin} -> {ok, binary_to_term(Bin)};
+        not_found -> {error, undefined}
+    end.
+
+db_write(Ref, Key, Val) ->
     bitcask:put(Ref, Key, term_to_binary(Val)).
 
-write_sync(Ref, Key, Val) ->
+db_write_sync(Ref, Key, Val) ->
     bitcask:put(Ref, Key, term_to_binary(Val)),
     bitcask:sync(Ref).
 

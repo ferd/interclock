@@ -10,7 +10,8 @@
 
 all() -> [{group, boot},
           {group, fork},
-          {group, join}].
+          {group, join},
+          {group, read_write}].
 
 groups() ->
     [{boot, [],
@@ -22,7 +23,9 @@ groups() ->
      {fork, [],
       [fork_standalone]},
      {join, [],
-      [join_standalone, join_bad_id, join_shutdown]} % add: join_shutdown
+      [join_standalone, join_bad_id, join_shutdown]},
+     {read_write, [],
+      [read_write]}
     ].
 
 init_per_suite(Config) ->
@@ -77,6 +80,16 @@ init_per_testcase(join_shutdown, Config) ->
     {ok, Started} = application:ensure_all_started(interclock),
     Path = filename:join(?config(priv_dir, Config), "join_shutdown"),
     Name = join_shutdown,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile},
+     {started, Started} | Config];
+init_per_testcase(read_write, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "read_write"),
+    Name = read_write,
     UUID = uuid:get_v4(),
     Db = filename:join(Path, "db"),
     LogFile = filename:join(Path, "log"),
@@ -536,6 +549,37 @@ join_shutdown(Config) ->
     {error, nofile} = disk_read(?config(db, Config), <<"id">>),
     ?assertExit({noproc, _Stack}, interclock:identity(Name)).
 
+%% All causational systems have a problem whenever the client isn't the
+%% server itself, but may represent multiple users writing the data.
+%% In such cases, it makes sense for the client to hold its own copy of the
+%% data or event counter in order to detect conflicts between reads and
+%% writes if they are to happen. The alternative is to go through DVVs
+%% (http://arxiv.org/pdf/1011.5808v1.pdf), which can track conflicts server-
+%% side only. The different solutions are:
+%%
+%% - Have the clients part of the clock
+%% - Have stateless client enforce read-your-writes semantics
+%% - pick up a maximum on the server to figure out a most recent entry to win
+%% - DVV approach for tracking conflicts on a local node.
+%%
+%% Because Interclock is more intended for rare or sparse updates and intended
+%% originally to be used server-side as much as possible, we consider the
+%% server to be the main client and will ignore most issues until they become
+%% really apparent.
+read_write(Config) ->
+    Name = ?config(name, Config),
+    Id = ?config(id, Config),
+    {error, undefined} = interclock:read(Name, <<"my_key">>),
+    ok = interclock:write(Name, <<"my_key">>, some_value),
+    {ok, some_value} = interclock:read(Name, <<"my_key">>),
+    {ok, Event1, [some_value]} = interclock:peek(Name, <<"my_key">>),
+    ok = interclock:write(Name, <<"my_key">>, other_value),
+    {ok, Event2, [other_value]} = interclock:peek(Name, <<"my_key">>),
+    true = itc:leq(itc:rebuild(Id, Event1), itc:rebuild(Id, Event2)),
+    false = itc:leq(itc:rebuild(Id, Event2), itc:rebuild(Id, Event1)).
+
+%% Also: do conflicts
+%% Deletion is a tricky case that may end up requiring tombstones!
 
 %%%===================================================================
 %%% Helpers

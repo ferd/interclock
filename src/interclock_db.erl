@@ -5,7 +5,7 @@
 %% API
 -export([start_link/5,
          identity/1, fork/1, join/2, retire/1,
-         read/2, peek/2, write/3]).
+         read/2, peek/2, write/3, sync/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -51,6 +51,9 @@ peek(Name, Key) when is_binary(Key) ->
 
 write(Name, Key, Val) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {write, Key, Val}).
+
+sync(Name, Key, EventClock, Val=[_|_]) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {sync, Key, EventClock, Val}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -132,28 +135,43 @@ handle_call(retire, _From, State=#state{id=Id, uuid=UUID, log=Log, db_path=Db, d
 
 handle_call({read, Key}, _From, State=#state{db_ref=Db}) ->
     Reply = case db_read(Db, Key) of
-        {ok, {_Clock, [Val]}} -> {ok, Val};
-        {error, undefined} -> {error, undefined}
+        {ok, {_Event, [Val]}} -> % 1 value, we're good
+            {ok, Val};
+        {ok, {_Event, Vals=[_|_]}} -> % >1 values, conflict!
+            {conflict, Vals};
+        {error, undefined} -> % not found, woe is me
+            {error, undefined}
     end,
     {reply, Reply, State};
 
 handle_call({peek, Key}, _From, State=#state{db_ref=Db}) ->
     Reply = case db_read(Db, Key) of
-        {ok, {Clock, Vals}} -> {ok, Clock, Vals};
+        {ok, {Event, Vals}} -> {ok, Event, Vals};
         {error, undefined} -> {error, undefined}
     end,
     {reply, Reply, State};
 
 handle_call({write, Key, Val}, _From, State=#state{db_ref=Db, id=Id}) ->
     case db_read(Db, Key) of
-        {ok, {Clock, _}} ->
-            {_, NewClock} = itc:explode(itc:event(itc:rebuild(Id, Clock))),
-            db_write(Db, Key, {NewClock, [Val]});
-        {error, undefined} ->
-            {_, Clock} = itc:explode(itc:rebuild(Id, undefined)),
-            db_write(Db, Key, {Clock, [Val]})
+        {ok, {Event, _}} -> % value already exists
+            db_write(Db, Key, {incr(Id, Event), [Val]});
+        {error, undefined} -> % first insert ever
+            db_write(Db, Key, {incr(Id, undefined), [Val]})
     end,
     {reply, ok, State};
+
+handle_call({sync, Key, PeerEvent, PeerVal}, _From, State=#state{db_ref=Db, id=Id}) ->
+    PeerClock = peer_clock(Id, PeerEvent),
+    case db_read(Db, Key) of
+        {ok, {LocalEvent, LocalVal}} ->
+            LocalClock = local_clock(Id, LocalEvent),
+            Response = sync(Db, Key, PeerClock, PeerVal, LocalClock, LocalVal),
+            {reply, Response, State};
+        {error, undefined} ->
+            db_write(Db, Key, {PeerEvent, PeerVal}),
+            {reply, peer, State}
+    end;
+
 
 
 handle_call(_Request, _From, State) ->
@@ -349,4 +367,38 @@ maybe_join(IdA, IdB) ->
     catch
         Class:Reason -> % ooh a risky catch-all
             {error, {Class,Reason}}
+    end.
+
+
+local_clock(Id, Event) ->
+    itc:rebuild(Id, Event).
+peer_clock(Id, Event) ->
+    itc:peek(itc:rebuild(Id, Event)).
+
+incr(Id, undefined) ->
+    {_, Event} = itc:explode(itc:rebuild(Id, undefined)),
+    Event;
+incr(Id, Event) ->
+    {_, NewEvent} = itc:explode(itc:event(itc:rebuild(Id, Event))),
+    NewEvent.
+
+join_events(PeerClock, LocalClock) ->
+    {_,NewEvent} = itc:explode(itc:join(PeerClock, LocalClock)),
+    NewEvent.
+
+sync(Db, Key, PeerClock, PeerData, LocalClock, LocalData) ->
+    NewEvent = join_events(PeerClock, LocalClock),
+    case itc:leq(PeerClock, LocalClock) of
+        true ->
+            db_write(Db, Key, {NewEvent, LocalData}),
+            local;
+        false ->
+            case itc:leq(LocalClock, PeerClock) of
+                true ->
+                    db_write(Db, Key, {NewEvent, PeerData}),
+                    peer;
+                false ->
+                    db_write(Db, Key, {NewEvent, LocalData++PeerData}),
+                    conflict
+            end
     end.

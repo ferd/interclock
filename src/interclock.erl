@@ -1,7 +1,7 @@
 -module(interclock).
 
 -export([boot/2, identity/1, fork/1, join/2, retire/1]).
--export([read/2, peek/2, write/3]).
+-export([read/2, peek/2, write/3, sync/4]).
 
 -type name() :: term().
 -type type() :: 'root' | 'normal'.
@@ -54,6 +54,9 @@ peek(Name, Key) ->
 
 write(Name, Key, Val) ->
     interclock_db:write(Name, Key, Val).
+
+sync(Name, Key, EventClock, Val) ->
+    interclock_db:sync(Name, Key, EventClock, Val).
 
 %%%===================================================================
 %%% private

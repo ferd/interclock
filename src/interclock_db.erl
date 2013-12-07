@@ -154,9 +154,9 @@ handle_call({peek, Key}, _From, State=#state{db_ref=Db}) ->
 handle_call({write, Key, Val}, _From, State=#state{db_ref=Db, id=Id}) ->
     case db_read(Db, Key) of
         {ok, {Event, _}} -> % value already exists
-            db_write(Db, Key, {incr(Id, Event), [Val]});
+            db_write_sync(Db, Key, {incr(Id, Event), [Val]});
         {error, undefined} -> % first insert ever
-            db_write(Db, Key, {incr(Id, undefined), [Val]})
+            db_write_sync(Db, Key, {incr(Id, undefined), [Val]})
     end,
     {reply, ok, State};
 

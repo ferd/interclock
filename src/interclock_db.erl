@@ -5,7 +5,7 @@
 %% API
 -export([start_link/5,
          identity/1, fork/1, join/2, retire/1,
-         read/2, peek/2, write/3, sync/4]).
+         read/2, peek/2, write/3, sync/4, delete/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -53,7 +53,12 @@ write(Name, Key, Val) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {write, Key, Val}).
 
 sync(Name, Key, EventClock, Val=[_|_]) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {sync, Key, EventClock, Val});
+sync(Name, Key, EventClock, Val={deleted,_,_}) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {sync, Key, EventClock, Val}).
+
+delete(Name, Key) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {delete, Key}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -139,6 +144,10 @@ handle_call({read, Key}, _From, State=#state{db_ref=Db}) ->
             {ok, Val};
         {ok, {_Event, Vals=[_|_]}} -> % >1 values, conflict!
             {conflict, Vals};
+        {ok, {_Event, {deleted, _Stamp, Vals=[_|_]}}} ->
+            {conflict, deleted, Vals};
+        {ok, {_Event, {deleted, _Stamp, []}}} ->
+            {error, undefined};
         {error, undefined} -> % not found, woe is me
             {error, undefined}
     end,
@@ -172,7 +181,14 @@ handle_call({sync, Key, PeerEvent, PeerVal}, _From, State=#state{db_ref=Db, id=I
             {reply, peer, State}
     end;
 
-
+handle_call({delete, Key}, _From, State=#state{db_ref=Db, id=Id}) ->
+    case db_read(Db, Key) of
+        {ok, {Event, _}} -> % value already exists
+            db_write_sync(Db, Key, {incr(Id, Event), {deleted, epoch(), []}});
+        {error, undefined} -> % first insert ever
+            db_write_sync(Db, Key, {incr(Id, undefined), {deleted, epoch(), []}})
+    end,
+    {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
     {noreply, State}.
@@ -398,7 +414,25 @@ sync(Db, Key, PeerClock, PeerData, LocalClock, LocalData) ->
                     db_write(Db, Key, {NewEvent, PeerData}),
                     peer;
                 false ->
-                    db_write(Db, Key, {NewEvent, LocalData++PeerData}),
+                    conflict(Db, Key, NewEvent, LocalData, PeerData),
                     conflict
             end
     end.
+
+%% Handle difference between deletions and regular writes.
+conflict(Db, Key, NewEvent, LocalData, PeerData) ->
+    case {LocalData, PeerData} of
+        {{deleted, SLocal, Local}, {deleted, SPeer, Peer}} -> % 2 deletions
+            Stamp = max(SLocal, SPeer),
+            db_write(Db, Key, {NewEvent, {deleted, Stamp, Local++Peer}});
+        {{deleted, Stamp, Local}, _} -> % 1 deletion
+            db_write(Db, Key, {NewEvent, {deleted, Stamp, Local++PeerData}});
+        {_, {deleted, Stamp, Peer}} -> % 1 deletion
+            db_write(Db, Key, {NewEvent, {deleted, Stamp, LocalData++Peer}});
+        {_, _} -> % writes only
+            db_write(Db, Key, {NewEvent, LocalData++PeerData})
+    end.
+
+epoch() ->
+    {Mega, Sec, _Micro} = os:timestamp(),
+    (Mega * 1000000) + Sec.

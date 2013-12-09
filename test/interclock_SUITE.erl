@@ -11,7 +11,8 @@
 all() -> [{group, boot},
           {group, fork},
           {group, join},
-          {group, read_write}].
+          {group, read_write},
+          {group, delete}].
 
 groups() ->
     [{boot, [],
@@ -25,7 +26,9 @@ groups() ->
      {join, [],
       [join_standalone, join_bad_id, join_shutdown]},
      {read_write, [],
-      [read_write, read_write_sync]}
+      [read_write, read_write_sync]},
+     {delete, [],
+      [delete, delete_sync]}
     ].
 
 init_per_suite(Config) ->
@@ -102,6 +105,31 @@ init_per_testcase(read_write_sync, Config) ->
     PathAlt = filename:join(?config(priv_dir, Config), "read_write_sync_fork"),
     Name = read_write_sync,
     ForkName = read_write_sync_fork,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    {UUID, Fork} = interclock:fork(Name),
+    ok = interclock:boot(ForkName, [{type, normal}, {dir, PathAlt},
+                                     {uuid, UUID}, {id, Fork}]),
+    [{root_name,Name}, {fork_name,ForkName}, {uuid, UUID}, {db, Db},
+     {log, LogFile}, {started, Started} | Config];
+init_per_testcase(delete, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "delete"),
+    Name = delete,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{name,Name}, {uuid, UUID}, {db, Db}, {log, LogFile},
+     {started, Started} | Config];
+init_per_testcase(delete_sync, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "delete_sync"),
+    PathAlt = filename:join(?config(priv_dir, Config), "delete_sync_fork"),
+    Name = delete_sync,
+    ForkName = delete_sync_fork,
     UUID = uuid:get_v4(),
     Db = filename:join(Path, "db"),
     LogFile = filename:join(Path, "log"),
@@ -640,6 +668,80 @@ read_write_sync(Config) ->
     {ok, crushed} = interclock:read(Fork, <<"key">>).
 
 %% Deletion is a tricky case that may end up requiring tombstones!
+delete(Config) ->
+    Name = ?config(name, Config),
+    Id = ?config(id, Config),
+    {error, undefined} = interclock:read(Name, <<"my_key">>),
+    ok = interclock:write(Name, <<"my_key">>, some_value),
+    {ok, some_value} = interclock:read(Name, <<"my_key">>),
+    ok = interclock:delete(Name, <<"my_key">>),
+    {error, undefined} = interclock:read(Name, <<"my_key">>),
+    {ok, Event1, {deleted, _TS, []}} = interclock:peek(Name, <<"my_key">>),
+    ok = interclock:write(Name, <<"my_key">>, other_value),
+    {ok, Event2, [other_value]} = interclock:peek(Name, <<"my_key">>),
+    true = itc:leq(itc:rebuild(Id, Event1), itc:rebuild(Id, Event2)),
+    false = itc:leq(itc:rebuild(Id, Event2), itc:rebuild(Id, Event1)).
+
+delete_sync(Config) ->
+    Root = ?config(root_name, Config),
+    Fork = ?config(fork_name, Config),
+    %% Case 1: basic replication copies data as is given one copy leads
+    %%         over another one.
+    interclock:write(Fork, <<"key">>, val),
+    interclock:delete(Fork, <<"key">>),
+    {ok, Event1, Vals1} = interclock:peek(Fork, <<"key">>),
+    peer = interclock:sync(Root, <<"key">>, Event1, Vals1),
+    {ok, Event1, Vals1} = interclock:peek(Root, <<"key">>),
+    %% Case 2: This can go both ways.
+    interclock:write(Root, <<"key">>, val2),
+    interclock:delete(Root, <<"key">>),
+    {ok, Event2, Vals2} = interclock:peek(Root, <<"key">>),
+    ?assertNotEqual(Event1, Event2),
+    peer = interclock:sync(Fork, <<"key">>, Event2, Vals2),
+    {ok, Event2, Vals2} = interclock:peek(Fork, <<"key">>),
+    %% Case 3: Concurrent writes and deletes conflict and are paired together,
+    %%         and per-record. Conflicts are not in any particular order.
+    interclock:write(Root, <<"key">>, new_val),
+    interclock:delete(Root, <<"key">>),
+    interclock:write(Fork, <<"key">>, other_val),
+    {ok, EventA, ValsA} = interclock:peek(Root, <<"key">>),
+    {ok, EventB, ValsB} = interclock:peek(Fork, <<"key">>),
+    conflict = interclock:sync(Root, <<"key">>, EventB, ValsB),
+    conflict = interclock:sync(Fork, <<"key">>, EventA, ValsA),
+    %% we get conflict lists that are complete and contain deletion vs.
+    %% values info
+    {conflict, deleted, ValsB} = interclock:read(Root, <<"key">>),
+    {conflict, deleted, ValsB} = interclock:read(Fork, <<"key">>),
+    {ok, EventD, {deleted, _, ValsB}} = interclock:peek(Root, <<"key">>),
+    {ok, EventD, {deleted, _, ValsB}} = interclock:peek(Fork, <<"key">>),
+    %% Case 4: A write can crush both and will later sync correctly
+    %%         to the other node.
+    interclock:write(Root, <<"key">>, crushed),
+    {ok, EventLast, Crushed} = interclock:peek(Root, <<"key">>),
+    peer = interclock:sync(Fork, <<"key">>, EventLast, Crushed),
+    {ok, crushed} = interclock:read(Fork, <<"key">>),
+    %% Case 5: A delete to a conflict including deletion asserts the
+    %%         deletion. The higher event clock means that when re-
+    %%         syncing, we confirm the deletion and crush the conflicted
+    %%         bits.
+    interclock:delete(Root, <<"key">>),
+    interclock:write(Fork, <<"key">>, new),
+    {ok, EventE, ValsE} = interclock:peek(Root, <<"key">>),
+    {ok, EventF, ValsF} = interclock:peek(Fork, <<"key">>),
+    conflict = interclock:sync(Fork, <<"key">>, EventE, ValsE),
+    conflict = interclock:sync(Root, <<"key">>, EventF, ValsF),
+    {ok, _, {deleted, _, [_|_]}} = interclock:peek(Root, <<"key">>),
+    {ok, _, {deleted, _, [_|_]}} = interclock:peek(Fork, <<"key">>),
+    interclock:delete(Root, <<"key">>),
+    interclock:write(Fork, <<"key">>, new),
+    {ok, EventG, {deleted, _, []}} = interclock:peek(Root, <<"key">>),
+    {ok, _, [new]} = interclock:peek(Fork, <<"key">>),
+    %% Case 6: Multiple writes are preserved when syncing.
+    conflict = interclock:sync(Fork, <<"key">>, EventG, {deleted, 10, [old]}),
+    {conflict, deleted, List} = interclock:read(Fork, <<"key">>),
+    [new, old] = lists:sort(List).
+
+%% Todo: deletion tombstone garbage collection.
 
 %%%===================================================================
 %%% Helpers

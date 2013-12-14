@@ -12,5 +12,7 @@
   ]},
   {mod, {interclock_app, []}},
   {env, [
+    {gc_delay, 4320000}, % 50 days (in secs)
+    {gc_interval, 604800} % 7 days (in secs)
   ]}
 ]}.

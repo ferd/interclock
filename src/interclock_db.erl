@@ -88,6 +88,8 @@ init({Name, Id, UUID, Path, Type}) ->
             log({booted, calendar:local_time(), UUID, Id, []}, Log),
             Ref = bitcask:open(Db, [read_write]),
             TrustedId = ensure_identity(Ref, UUID, Id, Log),
+            gc(Ref), % GC on boot every time
+            gc_timer(),
             {ok, #state{id=TrustedId, uuid=UUID, dir=Path, log=Log,
                         db_path=Db, db_ref=Ref}}
     end.
@@ -216,6 +218,15 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info(garbage_collect, State=#state{db_ref=Db}) ->
+    %% For manual GC calls
+    gc(Db),
+    {noreply, State};
+handle_info({timeout, _Ref, gc}, State=#state{db_ref=Db}) ->
+    %% automated GC calls
+    gc(Db),
+    gc_timer(),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -436,3 +447,22 @@ conflict(Db, Key, NewEvent, LocalData, PeerData) ->
 epoch() ->
     {Mega, Sec, _Micro} = os:timestamp(),
     (Mega * 1000000) + Sec.
+
+gc(Db) ->
+    {ok, Delay} = application:get_env(interclock, gc_delay),
+    Threshold = epoch() - Delay,
+    OldFun = fun(Key, ValBin, Acc) ->
+        case binary_to_term(ValBin) of
+            {_, {deleted, Epoch, []}} when Epoch =< Threshold -> [Key|Acc];
+            _ -> Acc
+        end
+    end,
+    ToDelete = bitcask:fold(Db, OldFun, []),
+    [bitcask:delete(Db, Key) || Key <- ToDelete],
+    ok.
+
+gc_timer() ->
+    {ok, IntervalSecs} = application:get_env(interclock, gc_interval),
+    erlang:start_timer(timer:seconds(IntervalSecs),
+                       self(),
+                       gc).

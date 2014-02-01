@@ -5,7 +5,7 @@
 %% API
 -export([start_link/5,
          identity/1, fork/1, join/2, retire/1,
-         read/2, peek/2, write/3, sync/4, delete/2]).
+         read/2, peek/2, keys/1, write/3, sync/4, delete/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -48,6 +48,9 @@ read(Name, Key) when is_binary(Key) ->
 
 peek(Name, Key) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {peek, Key}).
+
+keys(Name) ->
+    gen_server:call({via, gproc, {n,l,Name}}, keys).
 
 write(Name, Key, Val) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {write, Key, Val}).
@@ -116,7 +119,7 @@ handle_call(fork, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
     {NewId,_} = itc:explode(NewClock),
     {PeerId,_} = itc:explode(PeerClock),
     log({forked, calendar:local_time(), UUID, Id, [{NewId,PeerId}]}, Log),
-    ok = db_write_sync(Db, <<"id">>, NewId),
+    ok = db_write_sync(Db, <<"$id">>, NewId),
     {reply, {UUID, PeerId}, State#state{id=NewId}};
 
 handle_call({join, OtherId}, _From, State=#state{id=Id, uuid=UUID, log=Log, db_ref=Db}) ->
@@ -125,7 +128,7 @@ handle_call({join, OtherId}, _From, State=#state{id=Id, uuid=UUID, log=Log, db_r
             {reply, bad_id, State};
         {ok, NewId} ->
             log({joined, calendar:local_time(), UUID, Id, [OtherId]}, Log),
-            ok = db_write_sync(Db, <<"id">>, NewId),
+            ok = db_write_sync(Db, <<"$id">>, NewId),
             {reply, {UUID, NewId}, State#state{id=NewId}}
     end;
 
@@ -161,6 +164,9 @@ handle_call({peek, Key}, _From, State=#state{db_ref=Db}) ->
         {error, undefined} -> {error, undefined}
     end,
     {reply, Reply, State};
+
+handle_call(keys, _From, State=#state{db_ref=Db}) ->
+    {reply, bitcask:list_keys(Db)--[<<"$id">>,<<"$uuid">>], State};
 
 handle_call({write, Key, Val}, _From, State=#state{db_ref=Db, id=Id}) ->
     case db_read(Db, Key) of
@@ -270,11 +276,11 @@ log(Term, FileName) ->
     file:close(IoDevice).
 
 ensure_identity(Ref, UUID, Id, Log) ->
-    case {bitcask:get(Ref, <<"id">>), bitcask:get(Ref, <<"uuid">>)} of
+    case {bitcask:get(Ref, <<"$id">>), bitcask:get(Ref, <<"$uuid">>)} of
         {not_found, not_found} ->
             %% first opening
-            ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
-            ok = bitcask:put(Ref, <<"uuid">>, term_to_binary(UUID)),
+            ok = bitcask:put(Ref, <<"$id">>, term_to_binary(Id)),
+            ok = bitcask:put(Ref, <<"$uuid">>, term_to_binary(UUID)),
             bitcask:sync(Ref),
             Id;
         {not_found, {ok, _Bin}} -> 
@@ -374,7 +380,7 @@ id_from_logs(Ref, UUID, DiskId, Log) ->
     end.
 
 recover(Ref, UUID, Id, Reason, Log) ->
-    ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
+    ok = bitcask:put(Ref, <<"$id">>, term_to_binary(Id)),
     bitcask:sync(Ref),
     log({recovered, calendar:local_time(), UUID, Id, [Reason]}, Log).
 

@@ -26,7 +26,7 @@ groups() ->
      {join, [],
       [join_standalone, join_bad_id, join_shutdown]},
      {read_write, [],
-      [read_write, read_write_sync]},
+      [read_write, read_write_sync, list_keys]},
      {delete, [],
       [delete, delete_sync]}
     ].
@@ -113,6 +113,16 @@ init_per_testcase(read_write_sync, Config) ->
     ok = interclock:boot(ForkName, [{type, normal}, {dir, PathAlt},
                                      {uuid, UUID}, {id, Fork}]),
     [{root_name,Name}, {fork_name,ForkName}, {uuid, UUID}, {db, Db},
+     {log, LogFile}, {started, Started} | Config];
+init_per_testcase(list_keys, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "list_keys"),
+    Name = list_keys,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    [{root_name,Name}, {uuid, UUID}, {db, Db},
      {log, LogFile}, {started, Started} | Config];
 init_per_testcase(delete, Config) ->
     {ok, Started} = application:ensure_all_started(interclock),
@@ -467,7 +477,7 @@ crashed_join_recovery(Config) ->
     %% to make sure that an outdated id on a restart lands us with the correct
     %% on-disk id
     ok = interclock:boot(crashed_join_recovery, [{type, normal}, {dir, Path},
-                                         {id, undefined}, {uuid, UUID}]),
+                                                 {id, undefined}, {uuid, UUID}]),
     {UUID, 1} = interclock:identity(crashed_join_recovery), % it recovered
     %% The internal log should show this
     {ok,NewLog} = file:consult(LogFile),
@@ -532,8 +542,8 @@ fork_standalone(Config) ->
                 end,
     [1] = [1 || Log <- Logs, ForkMatch(Log)],
     %% The DB has been updated to the new ID
-    {ok, NewId} = disk_read(?config(db, Config), <<"id">>),
-    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+    {ok, NewId} = disk_read(?config(db, Config), <<"$id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"$uuid">>).
 
 %%%===================================================================
 %%% Join Test cases
@@ -559,8 +569,8 @@ join_standalone(Config) ->
                 end,
     [1] = [1 || Log <- Logs, JoinMatch(Log)],
     %% The DB has been updated to the new ID
-    {ok, NewId} = disk_read(?config(db, Config), <<"id">>),
-    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+    {ok, NewId} = disk_read(?config(db, Config), <<"$id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"$uuid">>).
 
 join_bad_id(Config) ->
     Name = ?config(name, Config),
@@ -577,19 +587,19 @@ join_bad_id(Config) ->
                 end,
     [] = [1 || Log <- Logs, JoinMatch(Log)],
     %% The DB has kept the old id
-    {ok, Id} = disk_read(?config(db, Config), <<"id">>),
-    {ok, UUID} = disk_read(?config(db, Config), <<"uuid">>).
+    {ok, Id} = disk_read(?config(db, Config), <<"$id">>),
+    {ok, UUID} = disk_read(?config(db, Config), <<"$uuid">>).
 
 join_shutdown(Config) ->
     %% We can retire a node, which will give us its id back and delete its
     %% files on disk.
     Name = ?config(name, Config),
     {ok, _} = file:consult(?config(log, Config)),
-    {ok, Id} = disk_read(?config(db, Config), <<"id">>),
+    {ok, Id} = disk_read(?config(db, Config), <<"$id">>),
     {_UUID, Id} = interclock:retire(Name),
     {error, enoent} = file:consult(?config(log, Config)),
     %% this prints a lot of errors, but that's fine
-    {error, nofile} = disk_read(?config(db, Config), <<"id">>),
+    {error, nofile} = disk_read(?config(db, Config), <<"$id">>),
     ?assertExit({noproc, _Stack}, interclock:identity(Name)).
 
 %% All causational systems have a problem whenever the client isn't the
@@ -666,6 +676,19 @@ read_write_sync(Config) ->
     {ok, EventLast, Crushed} = interclock:peek(Root, <<"key">>),
     peer = interclock:sync(Fork, <<"key">>, EventLast, Crushed),
     {ok, crushed} = interclock:read(Fork, <<"key">>).
+
+list_keys(Config) ->
+    Root = ?config(root_name, Config),
+    %% Case 1: basic replication copies data as is given one copy leads
+    %%         over another one.
+    interclock:write(Root, <<"key1">>, val),
+    interclock:write(Root, <<"key2">>, val),
+    interclock:write(Root, <<"key3">>, val),
+    interclock:write(Root, <<"key4">>, val),
+    [<<"key1">>,
+     <<"key2">>,
+     <<"key3">>,
+     <<"key4">>] = lists:sort(interclock:keys(Root)).
 
 %% Deletion is a tricky case that may end up requiring tombstones!
 delete(Config) ->
@@ -748,8 +771,8 @@ delete_sync(Config) ->
 %%%===================================================================
 disk_state(Db, Id, UUID) ->
     Ref = bitcask:open(Db, [read_write]),
-    ok = bitcask:put(Ref, <<"id">>, term_to_binary(Id)),
-    ok = bitcask:put(Ref, <<"uuid">>, term_to_binary(UUID)),
+    ok = bitcask:put(Ref, <<"$id">>, term_to_binary(Id)),
+    ok = bitcask:put(Ref, <<"$uuid">>, term_to_binary(UUID)),
     ok = bitcask:close(Ref).
 
 disk_read(Db, Key) ->

@@ -178,6 +178,9 @@ boot_root(Config) ->
     {error, missing_identity} = interclock:boot(root_name, [{type, normal},
                                                             {id, 1},
                                                             {dir, Path}]),
+    %% Undefined path
+    {error, undefined_dir} = interclock:boot(root_name, [{type, normal},
+                                                         {uuid, UUID}]),
     %% Same uuid / path
     {error, exists} = interclock:boot(root_name, [{type, normal},
                                                   {uuid, UUID},

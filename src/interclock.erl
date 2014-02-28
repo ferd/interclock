@@ -16,8 +16,8 @@
 boot(Name, Opts) ->
     Path = proplists:get_value(dir, Opts),
     case {proplists:get_value(type, Opts, normal),
-                       proplists:get_value(uuid, Opts),
-                       proplists:get_value(id, Opts)} of
+          proplists:get_value(uuid, Opts),
+          proplists:get_value(id, Opts)} of
         {root, UUID, undefined} when UUID =/= undefined->
             {ClockId, _ClockEvent} = itc:explode(itc:seed()),
             start_process(Name, UUID, ClockId, Path, root);
@@ -67,6 +67,8 @@ delete(Name, Key) ->
 %%%===================================================================
 %%% private
 %%%===================================================================
+start_process(_Name, _UUID, _Id, undefined, _Type) ->
+    {error, undefined_dir};
 start_process(Name, UUID, Id, Path, Type) ->
     case supervisor:start_child(interclock_sup, [Name, UUID, Id, Path, Type]) of
         {error, Reason} -> {error, Reason};

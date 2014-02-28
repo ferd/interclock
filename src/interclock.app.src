@@ -1,6 +1,6 @@
 {application, interclock, [
   {description, "Storage for an ITC-based database"},
-  {vsn, "0.1.0"},
+  {vsn, "0.1.1"},
   {registered, [interclock_sup, interclock_manager]},
   {applications, [
     kernel,

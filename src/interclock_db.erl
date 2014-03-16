@@ -277,12 +277,14 @@ log(Term, FileName) ->
 
 ensure_identity(Ref, UUID, Id, Log) ->
     case {bitcask:get(Ref, <<"$id">>), bitcask:get(Ref, <<"$uuid">>)} of
-        {not_found, not_found} ->
+        {not_found, not_found} when Id =/= undefined ->
             %% first opening
             ok = bitcask:put(Ref, <<"$id">>, term_to_binary(Id)),
             ok = bitcask:put(Ref, <<"$uuid">>, term_to_binary(UUID)),
             bitcask:sync(Ref),
             Id;
+        {not_found, not_found} when Id =:= undefined ->
+            error(id_not_found);
         {not_found, {ok, _Bin}} -> 
             %% Maybe we crashed during first opening, but we should fail
             %% and require manual intervention for now
@@ -410,7 +412,7 @@ peer_clock(Id, Event) ->
 
 incr(Id, undefined) ->
     {_, Event} = itc:explode(itc:rebuild(Id, undefined)),
-    Event;
+    incr(Id, Event);
 incr(Id, Event) ->
     {_, NewEvent} = itc:explode(itc:event(itc:rebuild(Id, Event))),
     NewEvent.

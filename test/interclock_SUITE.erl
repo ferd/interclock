@@ -166,6 +166,8 @@ boot_root(Config) ->
     Path = filename:join(?config(priv_dir, Config), "boot_root"),
     PathAlt = filename:join(?config(priv_dir, Config), "boot_root_other"),
     UUID = uuid:get_v4(),
+    {error, missing_identity} = interclock:boot(root_name, [{uuid, UUID},
+                                                            {dir, Path}]),
     ok = interclock:boot(root_name, [{type, root}, {dir, Path}, {uuid, UUID}]),
     {SeedId,_SeedEv} = itc:explode(itc:seed()),
     {UUID, SeedId} = interclock:identity(root_name),

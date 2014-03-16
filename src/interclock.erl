@@ -71,6 +71,7 @@ start_process(_Name, _UUID, _Id, undefined, _Type) ->
     {error, undefined_dir};
 start_process(Name, UUID, Id, Path, Type) ->
     case supervisor:start_child(interclock_sup, [Name, UUID, Id, Path, Type]) of
+        {error, {id_not_found,_Stack}} -> {error, missing_identity};
         {error, Reason} -> {error, Reason};
         {ok, _Pid} -> ok
     end.

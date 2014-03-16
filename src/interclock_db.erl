@@ -433,8 +433,14 @@ sync(Db, Key, PeerClock, PeerData, LocalClock, LocalData) ->
                     db_write(Db, Key, {NewEvent, PeerData}),
                     peer;
                 false ->
-                    conflict(Db, Key, NewEvent, LocalData, PeerData),
-                    conflict
+                    case PeerData of
+                        LocalData -> % same entries on both ends can be merged
+                            db_write(Db, Key, {NewEvent, LocalData}),
+                            local;
+                        _ -> % different entries
+                            conflict(Db, Key, NewEvent, LocalData, PeerData),
+                            conflict
+                    end
             end
     end.
 

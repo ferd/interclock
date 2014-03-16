@@ -628,6 +628,7 @@ read_write(Config) ->
     Name = ?config(name, Config),
     Id = ?config(id, Config),
     {error, undefined} = interclock:read(Name, <<"my_key">>),
+    {error, undefined} = interclock:peek(Name, <<"my_key">>),
     ok = interclock:write(Name, <<"my_key">>, some_value),
     {ok, some_value} = interclock:read(Name, <<"my_key">>),
     {ok, Event1, [some_value]} = interclock:peek(Name, <<"my_key">>),

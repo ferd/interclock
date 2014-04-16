@@ -5,7 +5,8 @@
 %% API
 -export([start_link/5,
          identity/1, fork/1, join/2, retire/1,
-         read/2, peek/2, keys/1, write/3, sync/4, delete/2]).
+         read/2, peek/2, keys/1, write/3, sync/4, delete/2,
+         simulate_sync/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -62,6 +63,11 @@ sync(Name, Key, EventClock, Val={deleted,_,_}) when is_binary(Key) ->
 
 delete(Name, Key) when is_binary(Key) ->
     gen_server:call({via, gproc, {n,l,Name}}, {delete, Key}).
+
+simulate_sync(Name, Key, EventClock, Val=[_|_]) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {simulate_sync, Key, EventClock, Val});
+simulate_sync(Name, Key, EventClock, Val={deleted,_,_}) when is_binary(Key) ->
+    gen_server:call({via, gproc, {n,l,Name}}, {simulate_sync, Key, EventClock, Val}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -186,6 +192,17 @@ handle_call({sync, Key, PeerEvent, PeerVal}, _From, State=#state{db_ref=Db, id=I
             {reply, Response, State};
         {error, undefined} ->
             db_write(Db, Key, {PeerEvent, PeerVal}),
+            {reply, peer, State}
+    end;
+
+handle_call({simulate_sync, Key, PeerEvent, PeerVal}, _From, State=#state{db_ref=Db, id=Id}) ->
+    PeerClock = peer_clock(Id, PeerEvent),
+    case db_read(Db, Key) of
+        {ok, {LocalEvent, LocalVal}} ->
+            LocalClock = local_clock(Id, LocalEvent),
+            Response = simulate_sync(Db, Key, PeerClock, PeerVal, LocalClock, LocalVal),
+            {reply, Response, State};
+        {error, undefined} ->
             {reply, peer, State}
     end;
 
@@ -439,6 +456,24 @@ sync(Db, Key, PeerClock, PeerData, LocalClock, LocalData) ->
                             local;
                         _ -> % different entries
                             conflict(Db, Key, NewEvent, LocalData, PeerData),
+                            conflict
+                    end
+            end
+    end.
+
+simulate_sync(_Db, _Key, PeerClock, PeerData, LocalClock, LocalData) ->
+    case itc:leq(PeerClock, LocalClock) of
+        true ->
+            local;
+        false ->
+            case itc:leq(LocalClock, PeerClock) of
+                true ->
+                    peer;
+                false ->
+                    case PeerData of
+                        LocalData -> % same entries on both ends can be merged
+                            local;
+                        _ -> % different entries
                             conflict
                     end
             end

@@ -1,7 +1,7 @@
 -module(interclock).
 
 -export([boot/2, identity/1, fork/1, join/2, retire/1]).
--export([read/2, peek/2, keys/1, write/3, sync/4, delete/2, leq/2]).
+-export([read/2, peek/2, keys/1, write/3, sync/4, delete/2, simulate_sync/4]).
 
 -type name() :: term().
 -type type() :: 'root' | 'normal'.
@@ -64,8 +64,8 @@ sync(Name, Key, EventClock, Val) ->
 delete(Name, Key) ->
     interclock_db:delete(Name, Key).
 
-leq(EventA, EventB) ->
-    itc:leq(EventA, EventB).
+simulate_sync(Name, Key, EventClock, Val) ->
+    interclock_db:simulate_sync(Name, Key, EventClock, Val).
 
 %%%===================================================================
 %%% private

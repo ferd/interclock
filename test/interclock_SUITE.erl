@@ -26,7 +26,7 @@ groups() ->
      {join, [],
       [join_standalone, join_bad_id, join_shutdown]},
      {read_write, [],
-      [read_write, read_write_sync, list_keys]},
+      [read_write, read_write_sync, read_write_simulate_sync, list_keys]},
      {delete, [],
       [delete, delete_sync]}
     ].
@@ -105,6 +105,21 @@ init_per_testcase(read_write_sync, Config) ->
     PathAlt = filename:join(?config(priv_dir, Config), "read_write_sync_fork"),
     Name = read_write_sync,
     ForkName = read_write_sync_fork,
+    UUID = uuid:get_v4(),
+    Db = filename:join(Path, "db"),
+    LogFile = filename:join(Path, "log"),
+    ok = interclock:boot(Name, [{type, root}, {dir, Path}, {uuid, UUID}]),
+    {UUID, Fork} = interclock:fork(Name),
+    ok = interclock:boot(ForkName, [{type, normal}, {dir, PathAlt},
+                                     {uuid, UUID}, {id, Fork}]),
+    [{root_name,Name}, {fork_name,ForkName}, {uuid, UUID}, {db, Db},
+     {log, LogFile}, {started, Started} | Config];
+init_per_testcase(read_write_simulate_sync, Config) ->
+    {ok, Started} = application:ensure_all_started(interclock),
+    Path = filename:join(?config(priv_dir, Config), "read_write_simulate_sync"),
+    PathAlt = filename:join(?config(priv_dir, Config), "read_write_simulate_sync_fork"),
+    Name = read_write_simulate_sync,
+    ForkName = read_write_simulate_sync_fork,
     UUID = uuid:get_v4(),
     Db = filename:join(Path, "db"),
     LogFile = filename:join(Path, "log"),
@@ -680,6 +695,69 @@ read_write_sync(Config) ->
     %%         to the other node.
     interclock:write(Root, <<"key">>, crushed),
     {ok, EventLast, Crushed} = interclock:peek(Root, <<"key">>),
+    peer = interclock:sync(Fork, <<"key">>, EventLast, Crushed),
+    {ok, crushed} = interclock:read(Fork, <<"key">>).
+
+read_write_simulate_sync(Config) ->
+    Root = ?config(root_name, Config),
+    Fork = ?config(fork_name, Config),
+    %% Case 1: basic replication copies data as is given one copy leads
+    %%         over another one.
+    interclock:write(Fork, <<"key">>, val),
+    {ok, Event1, Vals1} = interclock:peek(Fork, <<"key">>),
+    %% No effect
+    peer = interclock:simulate_sync(Root, <<"key">>, Event1, Vals1),
+    {error, undefined} = interclock:peek(Root, <<"key">>),
+    %% Sync for real
+    peer = interclock:sync(Root, <<"key">>, Event1, Vals1),
+    {ok, Event1, Vals1} = interclock:peek(Root, <<"key">>),
+    %% Case 2: This can go both ways.
+    interclock:write(Root, <<"key">>, val2),
+    {ok, Event2, Vals2} = interclock:peek(Root, <<"key">>),
+    ?assertNotEqual(Event1, Event2),
+    peer = interclock:simulate_sync(Fork, <<"key">>, Event2, Vals2),
+    {ok, Event1, Vals1} = interclock:peek(Fork, <<"key">>),
+    peer = interclock:sync(Fork, <<"key">>, Event2, Vals2),
+    {ok, Event2, Vals2} = interclock:peek(Fork, <<"key">>),
+    %% Case 3: Concurrent writes conflict and are paired together, and
+    %%         per-record. Conflicts are not in any particular order.
+    interclock:write(Root, <<"key">>, new_val),
+    interclock:write(Fork, <<"key">>, other_val),
+    interclock:write(Fork, <<"heh">>, 1923.12),
+    {ok, EventA, ValsA} = interclock:peek(Root, <<"key">>),
+    {ok, EventB, ValsB} = interclock:peek(Fork, <<"key">>),
+    {ok, EventC, ValsC} = interclock:peek(Fork, <<"heh">>),
+    peer = interclock:simulate_sync(Root, <<"heh">>, EventC, ValsC),
+    conflict = interclock:simulate_sync(Root, <<"key">>, EventB, ValsB),
+    conflict = interclock:simulate_sync(Fork, <<"key">>, EventA, ValsA),
+    %% Nothing conflicts for real due to simulations
+    {ok, EventA, ValsA} = interclock:peek(Root, <<"key">>),
+    {ok, EventB, ValsB} = interclock:peek(Fork, <<"key">>),
+    {ok, EventC, ValsC} = interclock:peek(Fork, <<"heh">>),
+    %% Sync for real
+    peer = interclock:sync(Root, <<"heh">>, EventC, ValsC),
+    conflict = interclock:sync(Root, <<"key">>, EventB, ValsB),
+    conflict = interclock:sync(Fork, <<"key">>, EventA, ValsA),
+    %% we get conflict lists that are complete
+    {conflict, L1} = interclock:read(Root, <<"key">>),
+    {conflict, L2} = interclock:read(Fork, <<"key">>),
+    ?assertEqual(lists:sort(L1), lists:sort(L2)),
+    ?assertEqual(2, length(L1)),
+    ?assert(lists:member(new_val, L1)),
+    ?assert(lists:member(new_val, L2)),
+    ?assert(lists:member(other_val, L1)),
+    ?assert(lists:member(other_val, L2)),
+    {ok, EventD, [_,_]} = interclock:peek(Root, <<"key">>),
+    {ok, EventD, [_,_]} = interclock:peek(Fork, <<"key">>),
+    %% other key is fine
+    {ok, 1923.12} = interclock:read(Root, <<"heh">>),
+    %% Case 4: A write can crush both and will later sync correctly
+    %%         to the other node.
+    interclock:write(Root, <<"key">>, crushed),
+    {ok, EventLast, Crushed} = interclock:peek(Root, <<"key">>),
+    peer = interclock:simulate_sync(Fork, <<"key">>, EventLast, Crushed),
+    {ok, crushed} = interclock:read(Root, <<"key">>),
+    {conflict, L2} = interclock:read(Fork, <<"key">>),
     peer = interclock:sync(Fork, <<"key">>, EventLast, Crushed),
     {ok, crushed} = interclock:read(Fork, <<"key">>).
 

@@ -238,7 +238,6 @@ boot_slave(Config) ->
     [{booted, _, UUID, SeedId, []},
      {forked, _, UUID, SeedId, [{Forked,Fork}]}
      |_] = RootLog,
-    ct:pal("~p", [{UUID, Fork}]),
     [{booted, _, UUID, Fork, []} | _] = AltLog.
 
 %%%===================================================================

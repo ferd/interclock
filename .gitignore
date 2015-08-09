@@ -1,7 +1,3 @@
-/ebin
-/deps
-/logs
-/log
 .DS_Store
 *.swp
 *.swo
@@ -12,4 +8,4 @@ erl_crash.dump
 /doc/edoc-info
 /doc/erlang.png
 /doc/stylesheet.css
-.rebar
+_build/
